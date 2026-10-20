@@ -1,0 +1,73 @@
+name: Build and Push Docker Image
+
+on:
+  schedule:
+    - cron: '45 3 5,20 * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build_and_check_changes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine Version
+        id: get_version
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          
+          if [ -n "$INPUT_VERSION" ]; then
+            TAG="v${INPUT_VERSION#v}"
+            echo "Using manual input version: $TAG"
+          else
+            TAG=$(curl -s https://api.github.com/repos/dndx/phantun/releases/latest | jq -r .tag_name)
+            echo "Fetched latest version from GitHub: $TAG"
+          fi
+
+          VERSION_CLEAN=$(echo "$TAG" | sed 's/^v//')
+          
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION_CLEAN}" >> $GITHUB_ENV
+
+      - name: Check if the version has changed (Scheduled only)
+        id: check_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Manual trigger detected, forcing build."
+            echo "skip=false" >> $GITHUB_ENV
+          else
+            IMAGE_EXISTS=$(docker pull erstt/phantun:${{ env.VERSION }} > /dev/null 2>&1; echo $?)
+            if [ $IMAGE_EXISTS -eq 0 ]; then
+              echo "Image with version ${{ env.VERSION }} already exists, skipping build."
+              echo "skip=true" >> $GITHUB_ENV
+            else
+              echo "New version detected, building image."
+              echo "skip=false" >> $GITHUB_ENV
+            fi
+          fi
+
+      - name: Build and Push Multi-architecture Docker image
+        if: env.skip != 'true'
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION=${{ env.TAG }} \
+            -t erstt/phantun:${{ env.VERSION }} \
+            -t erstt/phantun:latest \
+            --push .
